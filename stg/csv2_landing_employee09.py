@@ -1,0 +1,114 @@
+from airflow import DAG
+from airflow.operators.empty import EmptyOperator
+from airflow.operators.python_operator import PythonOperator
+from airflow.models import Variable
+from airflow.utils.dates import days_ago
+from pyspark.sql import SparkSession
+import os
+from datetime import datetime, timedelta
+import pendulum
+
+
+# Get Variable from Airflow Variable
+param = Variable.get("postgres_neon_conn",deserialize_json=True)
+db_conn = param["jdbc_url"]
+
+# Database connection details (update as per your setup)
+DB_URL = db_conn
+DB_TABLE = 'public.employee'  # Target table in the landing schema
+
+# Source CSV file (update this path as per your setup)
+SOURCE_FILE = '/opt/airflow/dags/input/20180509/20180509.employes.csv'  # Path to the uploaded CSV file
+
+# Default arguments for the DAG
+args = {
+    'owner' : 'Bayu',
+    'depends_on_past': False,
+    'email_on_failure': False,
+    'email_on_retry': False,
+    'retries': 20, # unlimited retries
+    'retry_delay': timedelta(seconds=2),
+}
+
+# Initialize a Spark session
+def start_spark_session(SOURCE_FILE, DB_URL, DB_TABLE):
+
+    spark = SparkSession.builder \
+                .appName("spark_insert_categories") \
+                .config("spark.jars", "/opt/airflow/plugins/postgresql_jdbc.jar") \
+                .getOrCreate()
+    
+    try:
+        df = spark.read.options(header=True, inferSchema=True, delimiter = ';').csv(SOURCE_FILE)
+
+        # Write the DataFrame to the target database table using JDBC
+        df.write \
+            .format('jdbc') \
+            .option('url', DB_URL) \
+            .option('dbtable', DB_TABLE) \
+            .option('driver', 'org.postgresql.Driver') \
+            .mode('append') \
+            .save()
+    except Exception as e:
+        print(str(e))
+    finally:
+        spark.stop()
+
+
+# def spark_stop(spark):
+#     spark.stop()
+
+# Define the Airflow DAG
+with DAG(
+    dag_id='bayu_landing_employee09',
+    default_args=args,
+    schedule="50 19 * * *",
+    start_date=pendulum.datetime(2024, 10, 5, tz="Asia/Jakarta"),
+    catchup=False,
+) as dag:
+
+    # Define the Spark function to insert CSV into the database
+    # def process_csv_to_db(source_file, db_url, db_table):
+
+    #     # Read the CSV file into a Spark DataFrame
+    #     # df = spark.read.csv(source_file, header=True, inferSchema=True, delimiter = ';')
+    #     df = spark.read.options(header=True, inferSchema=True, delimiter = ';').csv(source_file)
+
+    #     # Write the DataFrame to the target database table using JDBC
+    #     df.write \
+    #         .format('jdbc') \
+    #         .option('url', db_url) \
+    #         .option('dbtable', db_table) \
+    #         .option('driver', 'org.postgresql.Driver') \
+    #         .mode('append') \
+    #         .save()
+        
+    #     spark_stop(spark)
+
+    #     # Stop the Spark session
+    #     # spark.stop()
+
+    #     print(f"Data from {source_file} inserted into {db_table}")
+
+    #EmptyOperator
+    task_start = EmptyOperator (
+        task_id='task_start'
+    )
+
+    task_end = EmptyOperator(
+        task_id='task_end'
+    )
+
+    # PythonOperator to run the Spark function
+    task_csv2landing = PythonOperator(
+        task_id='spark_csv2landing_categories',
+        python_callable=start_spark_session,
+        op_kwargs={
+            'SOURCE_FILE': SOURCE_FILE,
+            'DB_URL': DB_URL,
+            'DB_TABLE': DB_TABLE
+        }
+    )
+
+    # Define task order
+    task_start >> task_csv2landing >> task_end
